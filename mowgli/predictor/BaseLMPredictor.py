@@ -1,18 +1,14 @@
 from typing import List, Optional, Union, Dict, Any
 
 import IPython
-# import pytorch_lightning as pl
 import lazy_import
 
 pl = lazy_import.lazy_module('pytorch_lightning')
-# import numpy as np
 np = lazy_import.lazy_module('numpy')
-
-import torch
-from pytorch_lightning import Trainer
-from torch import nn
-import torch.utils.data
-from torch.optim import AdamW
+torch = lazy_import.lazy_module('torch')
+nn = lazy_import.lazy_module('torch.nn')
+torch_data = lazy_import.lazy_module('torch.utils.data')
+AdamW = lazy_import.lazy_module('torch.optim.AdamW')
 
 import mowgli.classes
 from mowgli.predictor.PytorchLigthningPredictor import PytorchLightningPredictor
@@ -63,12 +59,12 @@ class BaseLMTuner(pl.LightningModule):
 
     @property
     def trained_LM(self):
-        logger.info(f'trained_LM getter')
+        # logger.info(f'trained_LM getter')
         return self._trained_LM
 
     @trained_LM.setter
     def trained_LM(self, value: pl.LightningModule):
-        logger.info(f'trained_LM setter')
+        # logger.info(f'trained_LM setter')
         self._trained_LM = value
 
     ##############################################################
@@ -84,9 +80,10 @@ class BaseLMTuner(pl.LightningModule):
 
         return optimizer
 
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
         logits = self.forward(batch)
-        loss = self.loss(logits, batch["labels"])
+        loss = self.loss(input=logits.reshape([-1, batch['num_choice']]),
+                         target=batch["labels"])
         if self.trainer and self.trainer.use_dp:
             loss = loss.unsqueeze(0)
 
@@ -94,9 +91,9 @@ class BaseLMTuner(pl.LightningModule):
             "loss": loss
         }
 
-    def validation_step(self, batch, batch_idx):
-        logits = self.forward(batch)
-        loss = self.loss(logits, batch["labels"])
+    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
+        logits = self.forward(batch).reshape([-1, batch['num_choice']])
+        loss = self.loss(input=logits, target=batch["labels"])
         if self.trainer and self.trainer.use_dp:
             loss = loss.unsqueeze(0)
         return {
@@ -131,23 +128,29 @@ class BaseLMTuner(pl.LightningModule):
             batch_size=self.hparams["batch_size"], collate_fn=self.collate
         )
 
-    def collate(self, entries: List[mowgli.classes.Entry]) -> Dict[str, torch.Tensor]:
+    def collate(self, entries: List[mowgli.classes.Entry]) -> Dict[str, Union[torch.Tensor, int]]:
         sents = [e.context + e.question + a.text for e in entries for a in e.answers]
 
         tokens = self.trained_LM.collate(sents)
 
+        specs = {
+            'num_choice': len(entries[0].answers)
+        }
+
         if entries[0].correct_answer is not None:
             correct_labels = np.array([int(e.labels.index(e.correct_answer))
                                        for e in entries])
-            labels = np.squeeze(
-                np.eye(len(entries[0].answers))[correct_labels.reshape(-1)]
-            ).reshape([-1])
+            # labels = torch.LongTensor(np.squeeze(
+            #     np.eye(specs['num_choice'])[correct_labels.reshape(-1)]
+            # ).reshape([-1]))
+            labels = torch.LongTensor(correct_labels.reshape([-1]))
             labels = {'labels': labels}
         else:
             labels = {}
         return {
             **tokens,
-            **labels
+            **labels,
+            **specs,
         }
 
 
@@ -161,22 +164,22 @@ class BaseLMPredictor(PytorchLightningPredictor):
 
     @property
     def train_pl_module(self):
-        logger.info(f'train_pl_module getter')
+        # logger.info(f'train_pl_module getter')
         return self._train_pl_module
 
     @train_pl_module.setter
     def train_pl_module(self, m):
-        logger.info(f'train_pl_module setter')
+        # logger.info(f'train_pl_module setter')
         self._train_pl_module = m
 
     @property
     def tune_pl_module(self):
-        logger.info(f'tune_pl_module getter')
+        # logger.info(f'tune_pl_module getter')
         return self._tune_pl_module
 
     @tune_pl_module.setter
     def tune_pl_module(self, m):
-        logger.info(f'tune_pl_module setter')
+        # logger.info(f'tune_pl_module setter')
         self._tune_pl_module = m
 
     #################################################################
@@ -190,7 +193,7 @@ class BaseLMPredictor(PytorchLightningPredictor):
 
     def tune(self, dataset: mowgli.classes.Dataset, config: Any) -> Any:
         self.tune_pl_module.build()
-        trainer = Trainer(
+        trainer = pl.Trainer(
             gradient_clip_val=0,
             num_nodes=1,
             gpus=config['gpus'],
@@ -205,6 +208,7 @@ class BaseLMPredictor(PytorchLightningPredictor):
         )
         train_loader = self.tune_pl_module.dataset_to_dataloader(dataset.train)
         eval_loader = self.tune_pl_module.dataset_to_dataloader(dataset.dev)
+
         trainer.fit(self.tune_pl_module,
                     train_dataloader=train_loader,
                     val_dataloaders=eval_loader)
@@ -224,7 +228,7 @@ class BaseLMPredictor(PytorchLightningPredictor):
         IPython.embed()
 
         dataloader = self.tune_pl_module.dataset_to_dataloader(getattr(dataset, partition))
-        trainer = Trainer(
+        trainer = pl.Trainer(
             gradient_clip_val=0,
             num_nodes=1,
             gpus=config['gpus'],
